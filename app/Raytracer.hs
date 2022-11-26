@@ -8,6 +8,7 @@ import System.Random.Stateful
 import System.Random.MWC as MWC
 import qualified Linear as V3
 import Control.Applicative ( Applicative(liftA2) )
+import Control.Monad
 
 -- NECESSARY
 -- DONE refactor rayColor to use HitRecord
@@ -18,8 +19,13 @@ import Control.Applicative ( Applicative(liftA2) )
 -- DONE implement hittable lists
 -- DONE material typeclass
 -- DONE reflective metal material
--- TODO dielectric materials (naive approach)
--- TODO corrections to dielectrics
+-- DONE dielectric materials (naive approach)
+-- DONE corrections to dielectrics
+-- TODO translate camera transform
+-- TODO rotate camera transform
+-- TODO camera field of view
+-- TODO camera depth of field
+
 
 -- NOT NECESSARY
 -- DONE add mwc-random for sampling
@@ -27,9 +33,9 @@ import Control.Applicative ( Applicative(liftA2) )
 -- DONE limit child rays
 -- DONE add gamma correction
 -- DONE fix shadow acne
--- TODO improve memory efficiency with profiling
--- TODO refactor things into typeclasses
-
+-- DONE improve memory efficiency with profiling
+-- DONE refactor monadic code 
+-- DONE random test scene
 
 -- camera
 viewportHeight :: Double
@@ -78,12 +84,15 @@ wrapRV3 (V3 x y z) = RandomV3 x y z
 unwrapRV3 :: RandomV3 -> V3 Double
 unwrapRV3 (RandomV3 x y z) = V3 x y z
 
+randomColor :: StatefulGen g m => g -> m (V3 Double)
+randomColor g = unwrapRV3 <$> uniformRM (RandomV3 0 0 0, RandomV3 1 1 1) g
+
 reflect :: V3 Double -> V3 Double -> V3 Double
 reflect v n = v - 2 * dot v n *^ n
 
 randomInUnitSphereM :: StatefulGen g m => g -> m (V3 Double)
-randomInUnitSphereM g =  let p = uniformRM (RandomV3 (-1) (-1) (-1), RandomV3 1 1 1) g
-                             v3 = unwrapRV3 <$> p
+randomInUnitSphereM g = let cubeInterval = uniformRM (-1, 1) g
+                            v3 = liftM3 V3 cubeInterval cubeInterval cubeInterval
     in v3 >>= (\ v -> if quadrance v < 1 then pure v else randomInUnitSphereM g)
 
 randomInUnitSphere :: RandomGen g => g -> (V3 Double, g)
@@ -110,30 +119,65 @@ data Rect = Rect {
     height :: Integer,
     width :: Integer
 }
+generateRect :: Integer -> Double -> Rect
+generateRect imageWidth aspectRatio = Rect {width=imageWidth, height=round(fromIntegral imageWidth / aspectRatio)}
 
 data Material = Lambertian{albedo :: V3 Double}
-                 | Metal{albedo :: V3 Double, f :: Double}
+                | Metal{albedo :: V3 Double, f :: Double}
+                | JustRefractive{refractionIndex :: Double}
+                | Dielectric{refractionIndex :: Double}
 
 class Scatterable a where
     scatter :: StatefulGen g m => g -> a -> Ray -> HitRecord -> m (Either HitInvalid (Ray, V3 Double))
+
+
+refract :: V3 Double -> V3 Double -> Double -> V3 Double
+refract uv n etaRatio =
+    let cosTheta = min (dot (-uv) n) 1.0
+        perp = etaRatio *^ (uv + cosTheta *^ n)
+        parallelTo = (n^*).(0-).sqrt.abs.(1.0-).quadrance
+    in perp + parallelTo perp
+
 
 instance Scatterable Material where
     scatter g (Lambertian albedo) _ record = do
         scatterDirection <- (normal record +) . normalize <$> randomInUnitSphereM g
         let isDegenerate = V3.nearZero scatterDirection
-        if isDegenerate then
-            return $ Right (Ray{o= point record, dir=normal record},   albedo)
-        else
-            return $ Right (Ray{o=point record, dir=scatterDirection}, albedo)
+        return $ Right (Ray{o= point record, dir=if isDegenerate then normal record else scatterDirection},   albedo)
     scatter g (Metal albedo f) rayIn record = do
+        unitSphere <- randomInUnitSphereM g
         let reflected = reflect (normalize (dir rayIn)) (normal record)
-        let fuzz = if f < 1 then f else 1
-        scattered <- (\ r -> Ray{o=point record, dir=reflected + fuzz *^ r}) <$> randomInUnitSphereM g
+            fuzz = if f < 1 then f else 1
+            scattered = Ray{o=point record, dir=reflected + fuzz *^ unitSphere}
         if dot reflected (normal record) > 0 then
             return $ Right (scattered, albedo)
         else
             return (Left (HitInvalid "No reflection"))
+    scatter _ (JustRefractive ir) rayIn record = let
+            attenuation = V3 1.0 1.0 1.0
+            refractionRatio = if frontFace record then 1.0/ir else ir
+            refracted = refract (normalize $ dir rayIn) (normal record) refractionRatio
+            scattered = Ray{o=point record, dir=refracted}
+        in pure $ Right (scattered, attenuation)
+    scatter g (Dielectric ir) rayIn record = do
+        let attenuation = V3 1.0 1.0 1.0
+            refractionRatio = if frontFace record then 1.0/ir else ir
+            cosTheta = min (dot (((0-).normalize.dir) rayIn) (normal record) ) 1.0
+            sinTheta = sqrt.(1.0-) $ cosTheta*cosTheta
+            cantRefract = refractionRatio * sinTheta > 1.0
+        randomDouble <- uniformDouble01M g
+        let direction = if cantRefract || reflectance cosTheta refractionRatio > randomDouble
+            then reflect ((normalize.dir) rayIn) (normal record)
+            else refract ((normalize.dir) rayIn) (normal record) refractionRatio
+            scattered = Ray{o=point record, dir=direction}
+        return $ Right (scattered, attenuation)
 
+reflectance :: Fractional a => a -> a -> a
+reflectance cos rr = let
+    -- Schlick's approximation
+    r0 = (1-rr)/(1+rr)
+    r1 = r0*r0
+    in r1 + (1-r1)*(1.0-cos)^5
 
 getCameraRay :: (Double, Double) -> Ray
 getCameraRay (u, v) = Ray{o=origin, dir=lowerLeftCorner + u*^horizontal + v*^vertical - origin}
@@ -164,10 +208,7 @@ genRandomRayM :: StatefulGen g m => g -> Hittable -> Rect -> Int -> (Integer, In
 genRandomRayM g world im maxDepth (i, j) = do
     u <- (/ fromIntegral (width im - 1)) . (fromIntegral i +) <$> uniformDouble01M g
     v <- (/ fromIntegral (height im - 1)) . (fromIntegral j +) <$> uniformDouble01M g
-    let uv = (u, v)
-    let cr = getCameraRay uv
-    -- we are summing the results and must use all of them,
-    -- so foldl' is more efficient than foldr here
+    let cr = getCameraRay (u, v)
     rayColorM g world cr maxDepth
 
 generateRandomRaysM :: StatefulGen g m => g -> Hittable -> Rect -> Int -> Int -> m [(Word8, Word8, Word8)]
@@ -265,29 +306,61 @@ colorToPixel c = floor.(255.999*) <$> c
 clamp :: (Ord a) => a -> a -> a -> a
 clamp mn mx = max mn . min mx
 
-testScene :: Int -> Int -> Integer -> IO [(Word8, Word8, Word8)]
-testScene samplesPerPixel maxDepth imageWidth = do
+
+randomSphere :: StatefulGen g m => g -> (Double, Double) -> (Integer, Integer) -> m Hittable
+randomSphere g (xdiff, ydiff) (a, b) = do
+    chooseMat <- uniformDouble01M g
+
+    c1 <- randomColor g
+    c2 <- randomColor g
+    fuzz <- uniformDouble01M g
+    let center = V3 (fromIntegral a + 0.9*xdiff) 0.2 (fromIntegral b +0.9*ydiff)
+    let result  | chooseMat < 0.8 = Sphere center 0.2 (Lambertian (c1 * c2))
+                | chooseMat < 0.95 = Sphere center 0.2 (Metal (0.5 ^+^ (0.5 *^ c1)) (0.5 * fuzz))
+                | otherwise = Sphere center 0.2 (Dielectric 1.5)
+    return result
+
+randomScene :: StatefulGen g m => g -> m Hittable
+randomScene g = do
+    xdiff <- uniformDouble01M g
+    ydiff <- uniformDouble01M g
+    let diff = (xdiff, ydiff)
+        indices = [(a,b) | a <- [-11..11] , b <- [-11..11]]
+        abToCenter (a,b) = V3 (fromIntegral a + 0.9*xdiff) 0.2 (fromIntegral b + 0.9*ydiff)
+        pred ab = abToCenter ab - norm (V3 4 0.2 0) > 0.9
+        world = [Sphere (V3 0 (-1000) 0) 1000 (Lambertian 0.5),
+                 Sphere (V3 0 1 0) 1.0 (Dielectric 1.5),
+                 Sphere (V3 (-4) 1 0) 1.0 (Lambertian $ V3 0.4 0.2 0.1),
+                 Sphere (V3 4 1 0) 1.0 (Metal (V3 0.7 0.6 0.5) 0.0)]
+        goodIndices = filter pred indices
+    HittableList.(world ++) <$> mapM (randomSphere g diff) goodIndices
+
+
+testScene :: Int -> Int -> Rect -> IO [(Word8, Word8, Word8)]
+testScene samplesPerPixel maxDepth im = do
     -- initialize the pseudorandom number generator
     g <- MWC.create
-    -- image constants
-    let aspectRatio = 16.0/9.0
-    let imageHeight = round (fromIntegral imageWidth / aspectRatio)
 
     -- camera
     let viewportHeight = 2.0
-    let viewportWidth = aspectRatio * viewportHeight
-    let focalLength = 1.0
-    let origin = V3 0 0 0
-    let horizontal = V3 viewportWidth 0 0
-    let vertical   = V3 0 viewportHeight 0
-    let lowerLeftCorner = origin - horizontal/2 - vertical/2 - V3 0 0 focalLength
+        viewportWidth = aspectRatio * viewportHeight
+        focalLength = 1.0
+        origin = V3 0 0 0
+        horizontal = V3 viewportWidth 0 0
+        vertical   = V3 0 viewportHeight 0
+        lowerLeftCorner = origin - horizontal/2 - vertical/2 - V3 0 0 focalLength
 
-    let materialCenter = Lambertian (V3 0.7 0.3 0.3)
-    let materialGround = Lambertian (V3 0.8 0.8 0.0)
-    let materialLeft = Metal (V3 0.8 0.8 0.8) 0.3
-    let materialRight = Metal (V3 0.8 0.6 0.2) 1.0
-    let world = HittableList [Sphere (V3 0.0 (-100.5) (-1)) 100 materialCenter,
-           Sphere (V3 0.0 0.0 (-1.0)) 0.5 materialGround,
-           Sphere (V3 (-1.0) 0.0 (-1.0)) 0.5 materialLeft, Sphere (V3 1.0 0.0 (-1.0)) 0.5 materialRight]
+    --let materialCenter = Lambertian (V3 0.7 0.3 0.3)
+    --let materialLeft = Metal (V3 0.8 0.8 0.8) 0.3
+        materialGround = Lambertian (V3 0.8 0.8 0.0)
+        materialCenter = Lambertian (V3 0.1 0.2 0.5)
+        materialLeft = Dielectric{refractionIndex=1.5}
+        materialRight = Metal (V3 0.8 0.6 0.2) 0.0
+        world = HittableList [Sphere (V3 0.0 (-100.5) (-1)) 100 materialGround,
+           Sphere (V3 0.0 0.0 (-1.0)) 0.5 materialCenter,
+           Sphere (V3 (-1.0) 0.0 (-1.0)) 0.5 materialLeft,
+           Sphere (V3 (-1.0) 0.0 (-1.0)) (-0.4) materialLeft,
+           Sphere (V3 1.0 0.0 (-1.0)) 0.5 materialRight]
+    -- world <- randomScene g
 
-    generateRandomRaysM g world  Rect{height=imageHeight, width=imageWidth} samplesPerPixel maxDepth
+    generateRandomRaysM g world im samplesPerPixel maxDepth
