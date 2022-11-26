@@ -70,7 +70,8 @@ executable haskell-raytracer
                       linear ^>=1.21.10,
                       mtl ^>=2.2.2,
                       random ^>= 1.2.1.1,
-                      mwc-random ^>= 0.15.0.2
+                      mwc-random ^>= 0.15.0.2,
+                      terminal-progress-bar ^>= 0.4.1
 
     -- Directories containing source files.
     hs-source-dirs:   app
@@ -91,5 +92,6 @@ benchmark ray-benchmark
                       mtl ^>=2.2.2,
                       random ^>= 1.2.1.1,
                       mwc-random ^>= 0.15.0.2,
+                      terminal-progress-bar ^>= 0.4.1,
                       criterion >=1.4 && <1.6
     default-language: Haskell2010

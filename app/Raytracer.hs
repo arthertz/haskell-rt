@@ -9,6 +9,8 @@ import System.Random.MWC as MWC
 import qualified Linear as V3
 import Control.Applicative ( Applicative(liftA2) )
 import Control.Monad
+import System.ProgressBar
+import Control.Parallel
 
 -- NECESSARY
 -- DONE refactor rayColor to use HitRecord
@@ -36,6 +38,11 @@ import Control.Monad
 -- DONE improve memory efficiency with profiling
 -- DONE refactor monadic code 
 -- DONE random test scene
+-- DONE progress bar
+-- DONE project benchmark
+-- TODO acceleration structure
+-- TODO textures for diffuse materials
+-- TODO lights
 
 -- camera
 viewportHeight :: Double
@@ -204,17 +211,24 @@ rayColorM g world r depth = if depth <= 0 then pure (V3 0 0 0)
 processSamples :: Int -> V3 Double -> V3 Word8
 processSamples n = fmap (floor . (255 * ) . clamp 0 0.999 . sqrt . (/ fromIntegral n))
 
-genRandomRayM :: StatefulGen g m => g -> Hittable -> Rect -> Int -> (Integer, Integer)-> m (V3 Double)
-genRandomRayM g world im maxDepth (i, j) = do
+genRandomRayM :: StatefulGen g m =>Hittable -> Rect -> Int -> (Integer, Integer)-> g -> m (V3 Double)
+genRandomRayM world im maxDepth (i, j) g = do
     u <- (/ fromIntegral (width im - 1)) . (fromIntegral i +) <$> uniformDouble01M g
     v <- (/ fromIntegral (height im - 1)) . (fromIntegral j +) <$> uniformDouble01M g
     let cr = getCameraRay (u, v)
     rayColorM g world cr maxDepth
 
-generateRandomRaysM :: StatefulGen g m => g -> Hittable -> Rect -> Int -> Int -> m [(Word8, Word8, Word8)]
-generateRandomRaysM g world im numSamples maxDepth = do
-    averageSamples <- mapM (\ ij -> iterate' (liftA2 (+) (genRandomRayM g world im maxDepth ij)) (pure $ V3 0 0 0) !! numSamples)
-        [(i, j) | j <- map (height im -) [1 .. height im], i <- [1 .. width im]]
+genRandomRay  :: RandomGen g => Hittable -> Rect -> Int -> (Integer, Integer) ->  g -> (V3 Double, g)
+genRandomRay world im maxDepth (i,j) g = runStateGen g $ genRandomRayM world im maxDepth (i,j)
+
+generateRandomRays :: GenIO -> Hittable -> Rect -> Int -> Int -> ProgressBar () -> IO [(Word8, Word8, Word8)]
+generateRandomRays g world im numSamples maxDepth pb = do
+    let iterator = (\ ij acc -> liftA2 (+) acc (asGenIO (genRandomRayM world im maxDepth ij) g))
+    let samplePixel ij = (do -- increment the progress bar for one pixel
+                            result <- iterate' (iterator ij) (pure (V3 0 0 0)) !! numSamples
+                            _ <- incProgress pb 1
+                            return result)
+    averageSamples <- forM [(i, j) | j <- map (height im -) [1 .. height im], i <- [1 .. width im]] samplePixel
     let processedSamples = map (v3toTuple . processSamples numSamples) averageSamples
     return $! processedSamples
 
@@ -356,11 +370,12 @@ testScene samplesPerPixel maxDepth im = do
         materialCenter = Lambertian (V3 0.1 0.2 0.5)
         materialLeft = Dielectric{refractionIndex=1.5}
         materialRight = Metal (V3 0.8 0.6 0.2) 0.0
-        world = HittableList [Sphere (V3 0.0 (-100.5) (-1)) 100 materialGround,
-           Sphere (V3 0.0 0.0 (-1.0)) 0.5 materialCenter,
-           Sphere (V3 (-1.0) 0.0 (-1.0)) 0.5 materialLeft,
-           Sphere (V3 (-1.0) 0.0 (-1.0)) (-0.4) materialLeft,
-           Sphere (V3 1.0 0.0 (-1.0)) 0.5 materialRight]
-    -- world <- randomScene g
+        -- world = HittableList [Sphere (V3 0.0 (-100.5) (-1)) 100 materialGround,
+        --    Sphere (V3 0.0 0.0 (-1.0)) 0.5 materialCenter,
+        --    Sphere (V3 (-1.0) 0.0 (-1.0)) 0.5 materialLeft,
+        --    Sphere (V3 (-1.0) 0.0 (-1.0)) (-0.4) materialLeft,
+        --    Sphere (V3 1.0 0.0 (-1.0)) 0.5 materialRight]
+    world <- randomScene g
+    pb <- newProgressBar defStyle 10 (Progress 0 (fromInteger (width im * height im)) ())
 
-    generateRandomRaysM g world im samplesPerPixel maxDepth
+    generateRandomRays g world im samplesPerPixel maxDepth pb
