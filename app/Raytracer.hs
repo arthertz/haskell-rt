@@ -4,9 +4,9 @@ import GHC.List (iterate')
 import Linear.Metric
 import Linear.V3
 import Linear.Vector
+import Linear (nearZero)
 import System.Random.Stateful
 import System.Random.MWC as MWC
-import qualified Linear as V3
 import Control.Applicative ( Applicative(liftA2) )
 import Control.Monad
 import System.ProgressBar
@@ -24,12 +24,10 @@ import Control.Concurrent
 -- DONE reflective metal material
 -- DONE dielectric materials (naive approach)
 -- DONE corrections to dielectrics
--- TODO translate camera transform
--- TODO rotate camera transform
--- TODO camera field of view
+-- DONE translate camera transform
+-- DONE rotate camera transform
+-- DONE camera field of view
 -- TODO camera depth of field
--- TODO parallelism with lvish
--- TODO some kind of denoiser on the output
 
 
 -- NOT NECESSARY
@@ -46,35 +44,61 @@ import Control.Concurrent
 -- TODO acceleration structure
 -- TODO textures for diffuse materials
 -- TODO lights
+-- TODO parallelism
+-- TODO some kind of denoiser on the output
 
 -- camera
-viewportHeight :: Double
-viewportHeight = 2.0
+data Camera = Camera {
+viewportHeight :: Double,
+focalLength :: Double,
+origin :: V3 Double,
+aspectRatio :: Double,
+viewportWidth :: Double,
+horizontal :: V3 Double,
+vertical :: V3 Double,
+lowerLeftCorner :: V3 Double,
+vfov :: Double,
+w :: V3 Double,
+u :: V3 Double,
+v :: V3 Double}
 
-focalLength :: Double
-focalLength = 1.0
-origin :: V3 Double
-origin = V3 0 0 0
-aspectRatio :: Double
-aspectRatio = 16.0/9.0
-viewportWidth :: Double
-viewportWidth = aspectRatio * viewportHeight
-horizontal :: V3 Double
-horizontal = V3 viewportWidth 0 0
-vertical :: V3 Double
-vertical   = V3 0 viewportHeight 0
-lowerLeftCorner :: V3 Double
-lowerLeftCorner = origin - horizontal/2 - vertical/2 - V3 0 0 focalLength
+
+makeCamera :: V3 Double -> V3 Double -> V3 Double -> Double -> Double -> Camera
+makeCamera lookFrom lookAt vup verticalFieldOfView aspectRatio =
+    let theta = verticalFieldOfView * pi/180
+        h = tan (theta/2)
+        vh = 2.0 * h
+        vw = aspectRatio*vh
+        !w = normalize $! ( lookFrom - lookAt)
+        !u = normalize $! cross vup w
+        v = cross w u
+        origin = lookFrom
+        hor = vw *^ u
+        vert = vh *^ v
+        llc = origin - (hor ^/ 2) - (vert ^/ 2) - w
+
+        in Camera {
+            origin=origin,
+            aspectRatio=aspectRatio,
+            viewportHeight = vh,
+            viewportWidth = vw,
+            horizontal = hor,
+            vertical = vert,
+            lowerLeftCorner = llc,
+            vfov = verticalFieldOfView,
+            w = w, u=u, v=v}
+
+
 
 data Ray = Ray { o   :: V3 Double,
                  dir :: V3 Double}
 
 data HitRecord = HitRecord {
-    point :: !(V3 Double),
-    normal :: !(V3 Double),
-    hitMaterial :: !Material,
-    root :: !Double,
-    frontFace :: !Bool
+    point :: {-# UNPACK #-}  !(V3 Double),
+    normal :: {-# UNPACK #-} !(V3 Double),
+    hitMaterial :: {-# UNPACK #-}  !Material,
+    root :: {-# UNPACK #-} !Double,
+    frontFace :: {-# UNPACK #-} !Bool
 }
 
 -- newtype to avoid orphan instance
@@ -151,12 +175,12 @@ refract uv n etaRatio =
 
 instance Scatterable Material where
     scatter g (Lambertian albedo) _ record = do
-        scatterDirection <- (normal record +) . normalize <$> randomInUnitSphereM g
-        let isDegenerate = V3.nearZero scatterDirection
+        !scatterDirection <- (normal record +) . signorm <$> randomInUnitSphereM g
+        let isDegenerate = nearZero scatterDirection
         return $ Right (Ray{o= point record, dir=if isDegenerate then normal record else scatterDirection},   albedo)
     scatter g (Metal albedo f) rayIn record = do
         unitSphere <- randomInUnitSphereM g
-        let reflected = reflect (normalize (dir rayIn)) (normal record)
+        let !reflected = reflect (signorm (dir rayIn)) (normal record)
             fuzz = if f < 1 then f else 1
             scattered = Ray{o=point record, dir=reflected + fuzz *^ unitSphere}
         if dot reflected (normal record) > 0 then
@@ -166,19 +190,19 @@ instance Scatterable Material where
     scatter _ (JustRefractive ir) rayIn record = let
             attenuation = V3 1.0 1.0 1.0
             refractionRatio = if frontFace record then 1.0/ir else ir
-            refracted = refract (normalize $ dir rayIn) (normal record) refractionRatio
+            !refracted = refract (signorm $ dir rayIn) (normal record) refractionRatio
             scattered = Ray{o=point record, dir=refracted}
         in pure $ Right (scattered, attenuation)
     scatter g (Dielectric ir) rayIn record = do
         let attenuation = V3 1.0 1.0 1.0
             refractionRatio = if frontFace record then 1.0/ir else ir
-            cosTheta = min (dot (((0-).normalize.dir) rayIn) (normal record) ) 1.0
-            sinTheta = sqrt.(1.0-) $ cosTheta*cosTheta
+            !cosTheta = min (dot (((0-).signorm.dir) rayIn) (normal record) ) 1.0
+            !sinTheta = sqrt.(1.0-) $ cosTheta*cosTheta
             cantRefract = refractionRatio * sinTheta > 1.0
         randomDouble <- uniformDouble01M g
         let direction = if cantRefract || reflectance cosTheta refractionRatio > randomDouble
-            then reflect ((normalize.dir) rayIn) (normal record)
-            else refract ((normalize.dir) rayIn) (normal record) refractionRatio
+            then (reflect $! (signorm.dir) rayIn) $! normal record
+            else ((refract  $! (signorm.dir) rayIn) $! normal record) refractionRatio
             scattered = Ray{o=point record, dir=direction}
         return $ Right (scattered, attenuation)
 
@@ -189,8 +213,8 @@ reflectance cos rr = let
     r1 = r0*r0
     in r1 + (1-r1)*(1.0-cos)^5
 
-getCameraRay :: (Double, Double) -> Ray
-getCameraRay (u, v) = Ray{o=origin, dir=lowerLeftCorner + u*^horizontal + v*^vertical - origin}
+getCameraRay :: Camera -> (Double, Double) -> Ray
+getCameraRay Camera{origin=org, lowerLeftCorner=llc, horizontal=hor, vertical=vert} (u, v) = Ray{o=org, dir=llc + u*^hor + v*^vert - org}
 
 rayAt :: Ray -> Double -> V3 Double
 rayAt r t = let Ray {o = ro, dir = rdir} = r in ro + (t*^rdir)
@@ -207,26 +231,26 @@ rayColorM g world r depth = if depth <= 0 then pure (V3 0 0 0)
                              (attenuation*) <$> rayColorM g world scattered (depth-1)
             Left _ ->
                 let Ray {o = _, dir = d} = r
-                    V3 _ y _ = normalize d
+                    V3 _ !y _ = signorm d
                     t = 0.5*(y+1.0)
                 in pure (blendValue (V3 1.0 1.0 1.0) (V3 0.5 0.7 1.0) t)
 
 processSamples :: Int -> V3 Double -> V3 Word8
 processSamples n = fmap (floor . (255 * ) . clamp 0 0.999 . sqrt . (/ fromIntegral n))
 
-genRandomRayM :: StatefulGen g m =>Hittable -> Rect -> Int -> (Integer, Integer)-> g -> m (V3 Double)
-genRandomRayM world im maxDepth (i, j) g = do
+genRandomRayM :: StatefulGen g m => Camera -> Hittable -> Rect -> Int -> (Integer, Integer)-> g -> m (V3 Double)
+genRandomRayM cam world im maxDepth (i, j) g = do
     u <- (/ fromIntegral (width im - 1)) . (fromIntegral i +) <$> uniformDouble01M g
     v <- (/ fromIntegral (height im - 1)) . (fromIntegral j +) <$> uniformDouble01M g
-    let cr = getCameraRay (u, v)
+    let cr = getCameraRay cam (u, v)
     rayColorM g world cr maxDepth
 
-genRandomRay  :: RandomGen g => Hittable -> Rect -> Int -> (Integer, Integer) ->  g -> (V3 Double, g)
-genRandomRay world im maxDepth (i,j) g = runStateGen g $ genRandomRayM world im maxDepth (i,j)
+genRandomRay  :: RandomGen g => Camera -> Hittable -> Rect -> Int -> (Integer, Integer) ->  g -> (V3 Double, g)
+genRandomRay cam world im maxDepth (i,j) g = runStateGen g $ genRandomRayM cam world im maxDepth (i,j)
 
-generateRandomRays :: GenIO -> Hittable -> Rect -> Int -> Int -> ProgressBar () -> IO [(Word8, Word8, Word8)]
-generateRandomRays g world im numSamples maxDepth pb = do
-    let iterator = (\ ij acc -> liftA2 (+) acc (asGenIO (genRandomRayM world im maxDepth ij) g))
+generateRandomRays :: GenIO -> Camera -> Hittable -> Rect -> Int -> Int -> ProgressBar () -> IO [(Word8, Word8, Word8)]
+generateRandomRays g cam world im numSamples maxDepth pb = do
+    let iterator = (\ ij acc -> liftA2 (+) acc (asGenIO (genRandomRayM cam world im maxDepth ij) g))
     let samplePixel ij = (do -- increment the progress bar for one pixel
                             result <- iterate' (iterator ij) (pure (V3 0 0 0)) !! numSamples
                             _ <- incProgress pb 1
@@ -238,7 +262,7 @@ generateRandomRays g world im numSamples maxDepth pb = do
 
 -- bounds = (tmin, tmax)
 hit :: Hittable -> Ray -> Bounds -> Either HitInvalid HitRecord
-hit Sphere{center=ctr, radius=r, material=mat} ray bounds =
+hit Sphere{center=ctr, radius=r, material=mat} ray Bounds{tmin=tmin, tmax=tmax} =
     let Ray {o = ro, dir = rdir} = ray
         oc = ro - ctr
         a = quadrance rdir
@@ -250,8 +274,11 @@ hit Sphere{center=ctr, radius=r, material=mat} ray bounds =
         sqrt_discriminant = sqrt discriminant
         in if discriminant < 0 then
             Left (HitInvalid "Discriminant less than 0")
-        else let roots = ((-half_b - sqrt_discriminant)/a, (-half_b + sqrt_discriminant)/a)
-                 validRoot = nearestValidRoot roots bounds
+        else let nearRoot = (-half_b - sqrt_discriminant)/a
+                 farRoot  = (-half_b + sqrt_discriminant)/a
+                 validRoot  | nearRoot >= tmin && nearRoot <= tmax = Right nearRoot
+                            | farRoot >= tmin &&  farRoot <= tmax = Right farRoot
+                            | otherwise = Left (HitInvalid "Neither root is within bounds")
               in case validRoot of
                 -- if there isn't a valid root, propagate the error up
                 Left e -> Left e
@@ -259,7 +286,7 @@ hit Sphere{center=ctr, radius=r, material=mat} ray bounds =
                 Right root -> let
                                 p = rayAt ray root
                                 outwardNormal = (1/r) *^ (p - ctr)
-                                hr = setFaceNormal HitRecord{root = root, point = p, hitMaterial=mat} ray outwardNormal
+                                hr = setFaceNormal HitRecord{root = root, point = p, normal=V3 0 0 0, frontFace = False, hitMaterial=mat} ray outwardNormal
                                 in Right hr
 hit (HittableList ls) ray bounds = snd $ foldr
     (\ x (closestSoFar, oldResult)
@@ -324,6 +351,15 @@ clamp :: (Ord a) => a -> a -> a -> a
 clamp mn mx = max mn . min mx
 
 
+fastSqrt :: Double -> Double
+fastSqrt x = let n = sqrt (3/8)
+                 y = n*x^3
+            in x * (15/8 - y*(sqrt(25/6) - y))
+
+fastNorm :: V3 Double -> V3 Double
+fastNorm x = let n = fastSqrt (quadrance x) in n *^ x
+
+
 randomSphere :: StatefulGen g m => g -> (Double, Double) -> (Integer, Integer) -> m Hittable
 randomSphere g (xdiff, ydiff) (a, b) = do
     chooseMat <- uniformDouble01M g
@@ -352,6 +388,15 @@ randomScene g = do
         goodIndices = filter pred indices
     HittableList.(world ++) <$> mapM (randomSphere g diff) goodIndices
 
+wideAngleWorld :: Hittable
+wideAngleWorld =
+    let r = cos (pi/4)
+        left = Lambertian $ V3 0 0 1
+        right = Lambertian $ V3 1 0 0
+    in HittableList [
+        Sphere (V3 (-r) 0 (-1)) r left,
+        Sphere (V3 r 0 (-1)) r right]
+
 
 testScene :: Int -> Int -> Rect -> IO [(Word8, Word8, Word8)]
 testScene samplesPerPixel maxDepth im = do
@@ -359,13 +404,12 @@ testScene samplesPerPixel maxDepth im = do
     g <- MWC.create
 
     -- camera
-    let viewportHeight = 2.0
-        viewportWidth = aspectRatio * viewportHeight
-        focalLength = 1.0
-        origin = V3 0 0 0
-        horizontal = V3 viewportWidth 0 0
-        vertical   = V3 0 viewportHeight 0
-        lowerLeftCorner = origin - horizontal/2 - vertical/2 - V3 0 0 focalLength
+    let aspectRatio = 16.0/9.0
+        origin = V3 (-2) 2 1
+        lookAt = V3 0 0 (-1)
+        up = V3 0 1 0
+        fov = 30
+        cam = makeCamera origin lookAt up fov aspectRatio
 
     --let materialCenter = Lambertian (V3 0.7 0.3 0.3)
     --let materialLeft = Metal (V3 0.8 0.8 0.8) 0.3
@@ -380,5 +424,4 @@ testScene samplesPerPixel maxDepth im = do
            Sphere (V3 1.0 0.0 (-1.0)) 0.5 materialRight]
     -- world <- randomScene g
     pb <- newProgressBar defStyle 10 (Progress 0 (fromInteger (width im * height im)) ())
-
-    generateRandomRays g world im samplesPerPixel maxDepth pb
+    generateRandomRays g cam world im samplesPerPixel maxDepth pb

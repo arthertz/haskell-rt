@@ -4,8 +4,8 @@ import Codec.PPM.Binary ( writePPM )
 
 main :: IO()
 main = do
-    let numSamples = 4
-    let imageWidth = 720
+    let numSamples = 32
+    let imageWidth = 1080
     let aspectRatio = 16/9
     let im = generateRect imageWidth aspectRatio
     let imageHeight = height im
