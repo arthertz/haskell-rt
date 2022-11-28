@@ -10,6 +10,7 @@ import System.Random.MWC as MWC
 import Control.Applicative ( Applicative(liftA2) )
 import Control.Monad
 import System.ProgressBar
+import Control.DeepSeq
 import Control.Parallel
 import Control.Concurrent
 
@@ -243,7 +244,7 @@ genRandomRayM cam world im maxDepth (i, j) g = do
     u <- (/ fromIntegral (width im - 1)) . (fromIntegral i +) <$> uniformDouble01M g
     v <- (/ fromIntegral (height im - 1)) . (fromIntegral j +) <$> uniformDouble01M g
     let cr = getCameraRay cam (u, v)
-    rayColorM g world cr maxDepth
+    force rayColorM g world cr maxDepth
 
 genRandomRay  :: RandomGen g => Camera -> Hittable -> Rect -> Int -> (Integer, Integer) ->  g -> (V3 Double, g)
 genRandomRay cam world im maxDepth (i,j) g = runStateGen g $ genRandomRayM cam world im maxDepth (i,j)
@@ -256,7 +257,7 @@ generateRandomRays g cam world im numSamples maxDepth pb = do
                             _ <- incProgress pb 1
                             return result)
     averageSamples <- forM [(i, j) | j <- map (height im -) [1 .. height im], i <- [1 .. width im]] samplePixel
-    let processedSamples = map (v3toTuple . processSamples numSamples) averageSamples
+    let processedSamples = map (force . v3toTuple . processSamples numSamples) averageSamples
     return $! processedSamples
 
 
@@ -270,13 +271,14 @@ hit Sphere{center=ctr, radius=r, material=mat} ray Bounds{tmin=tmin, tmax=tmax} 
         -- this works because only care if the discriminant is greater than 0 and can factor out a 4
         half_b = dot oc rdir
         c = quadrance oc - r^2
-        discriminant = half_b*half_b - a*c
-        sqrt_discriminant = sqrt discriminant
+        !discriminant = half_b*half_b - a*c
         in if discriminant < 0 then
             Left (HitInvalid "Discriminant less than 0")
-        else let nearRoot = (-half_b - sqrt_discriminant)/a
-                 farRoot  = (-half_b + sqrt_discriminant)/a
-                 validRoot  | nearRoot >= tmin && nearRoot <= tmax = Right nearRoot
+        else let
+                 sqrt_discriminant = sqrt discriminant
+                 !nearRoot = (-half_b - sqrt_discriminant)/a
+                 !farRoot  = (-half_b + sqrt_discriminant)/a
+                 !validRoot | nearRoot >= tmin && nearRoot <= tmax = Right nearRoot
                             | farRoot >= tmin &&  farRoot <= tmax = Right farRoot
                             | otherwise = Left (HitInvalid "Neither root is within bounds")
               in case validRoot of
@@ -290,7 +292,7 @@ hit Sphere{center=ctr, radius=r, material=mat} ray Bounds{tmin=tmin, tmax=tmax} 
                                 in Right hr
 hit (HittableList ls) ray bounds = snd $ foldr
     (\ x (closestSoFar, oldResult)
-        -> let result = hit x ray Bounds{tmin=tmin bounds, tmax=closestSoFar}
+        -> let !result = hit x ray Bounds{tmin=tmin bounds, tmax=closestSoFar}
         in case oldResult of
             Left _ -> case result of
                 Left _ -> (closestSoFar, oldResult)
@@ -302,12 +304,6 @@ hit (HittableList ls) ray bounds = snd $ foldr
                     else (closestSoFar, oldResult) ) (tmax bounds, Left (HitInvalid "No valid target")) ls
 
 newtype HitInvalid = HitInvalid String
-
-nearestValidRoot :: (Double, Double) -> Bounds -> Either HitInvalid Double
-nearestValidRoot (nearRoot, farRoot) Bounds{tmin=tmin, tmax=tmax}
-  | nearRoot >= tmin && nearRoot <= tmax = Right nearRoot
-  | farRoot >= tmin &&  farRoot <= tmax = Right farRoot
-  | otherwise = Left (HitInvalid "Neither root is within bounds")
 
 
 v3toTuple :: V3 c -> (c, c, c)
@@ -363,7 +359,6 @@ fastNorm x = let n = fastSqrt (quadrance x) in n *^ x
 randomSphere :: StatefulGen g m => g -> (Double, Double) -> (Integer, Integer) -> m Hittable
 randomSphere g (xdiff, ydiff) (a, b) = do
     chooseMat <- uniformDouble01M g
-
     c1 <- randomColor g
     c2 <- randomColor g
     fuzz <- uniformDouble01M g
@@ -398,30 +393,30 @@ wideAngleWorld =
         Sphere (V3 r 0 (-1)) r right]
 
 
-testScene :: Int -> Int -> Rect -> IO [(Word8, Word8, Word8)]
-testScene samplesPerPixel maxDepth im = do
+testScene :: Int -> Int -> Integer -> Double -> IO [(Word8, Word8, Word8)]
+testScene samplesPerPixel maxDepth imageWidth aspectRatio = do
     -- initialize the pseudorandom number generator
     g <- MWC.create
 
     -- camera
-    let aspectRatio = 16.0/9.0
-        origin = V3 (-2) 2 1
-        lookAt = V3 0 0 (-1)
+    let imageHeight = round (fromIntegral imageWidth / aspectRatio) :: Integer
+        origin = V3 13 2 3
+        lookAt = V3 0 0 0
         up = V3 0 1 0
-        fov = 30
+        fov = 20
         cam = makeCamera origin lookAt up fov aspectRatio
 
     --let materialCenter = Lambertian (V3 0.7 0.3 0.3)
     --let materialLeft = Metal (V3 0.8 0.8 0.8) 0.3
-        materialGround = Lambertian (V3 0.8 0.8 0.0)
-        materialCenter = Lambertian (V3 0.1 0.2 0.5)
-        materialLeft = Dielectric{refractionIndex=1.5}
-        materialRight = Metal (V3 0.8 0.6 0.2) 0.0
-        world = HittableList [Sphere (V3 0.0 (-100.5) (-1)) 100 materialGround,
-           Sphere (V3 0.0 0.0 (-1.0)) 0.5 materialCenter,
-           Sphere (V3 (-1.0) 0.0 (-1.0)) 0.5 materialLeft,
-           Sphere (V3 (-1.0) 0.0 (-1.0)) (-0.4) materialLeft,
-           Sphere (V3 1.0 0.0 (-1.0)) 0.5 materialRight]
-    -- world <- randomScene g
-    pb <- newProgressBar defStyle 10 (Progress 0 (fromInteger (width im * height im)) ())
-    generateRandomRays g cam world im samplesPerPixel maxDepth pb
+        -- materialGround = Lambertian (V3 0.8 0.8 0.0)
+        -- materialCenter = Lambertian (V3 0.1 0.2 0.5)
+        -- materialLeft = Dielectric{refractionIndex=1.5}
+        -- materialRight = Metal (V3 0.8 0.6 0.2) 0.0
+        -- world = HittableList [Sphere (V3 0.0 (-100.5) (-1)) 100 materialGround,
+        --    Sphere (V3 0.0 0.0 (-1.0)) 0.5 materialCenter,
+        --    Sphere (V3 (-1.0) 0.0 (-1.0)) 0.5 materialLeft,
+        --    Sphere (V3 (-1.0) 0.0 (-1.0)) (-0.4) materialLeft,
+        --    Sphere (V3 1.0 0.0 (-1.0)) 0.5 materialRight]
+    world <- randomScene g
+    pb <- newProgressBar defStyle 10 (Progress 0 (fromIntegral (imageWidth * imageHeight)) ())
+    generateRandomRays g cam world Rect{ width=imageWidth, height=imageHeight} samplesPerPixel maxDepth pb
