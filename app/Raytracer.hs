@@ -11,6 +11,7 @@ import Control.Applicative ( Applicative(liftA2) )
 import Control.Monad
 import System.ProgressBar
 import Control.Parallel
+import Control.Concurrent
 
 -- NECESSARY
 -- DONE refactor rayColor to use HitRecord
@@ -27,6 +28,8 @@ import Control.Parallel
 -- TODO rotate camera transform
 -- TODO camera field of view
 -- TODO camera depth of field
+-- TODO parallelism with lvish
+-- TODO some kind of denoiser on the output
 
 
 -- NOT NECESSARY
@@ -67,11 +70,11 @@ data Ray = Ray { o   :: V3 Double,
                  dir :: V3 Double}
 
 data HitRecord = HitRecord {
-    point :: V3 Double,
-    normal :: V3 Double,
-    hitMaterial :: Material,
-    root :: Double,
-    frontFace :: Bool
+    point :: !(V3 Double),
+    normal :: !(V3 Double),
+    hitMaterial :: !Material,
+    root :: !Double,
+    frontFace :: !Bool
 }
 
 -- newtype to avoid orphan instance
@@ -370,12 +373,12 @@ testScene samplesPerPixel maxDepth im = do
         materialCenter = Lambertian (V3 0.1 0.2 0.5)
         materialLeft = Dielectric{refractionIndex=1.5}
         materialRight = Metal (V3 0.8 0.6 0.2) 0.0
-        -- world = HittableList [Sphere (V3 0.0 (-100.5) (-1)) 100 materialGround,
-        --    Sphere (V3 0.0 0.0 (-1.0)) 0.5 materialCenter,
-        --    Sphere (V3 (-1.0) 0.0 (-1.0)) 0.5 materialLeft,
-        --    Sphere (V3 (-1.0) 0.0 (-1.0)) (-0.4) materialLeft,
-        --    Sphere (V3 1.0 0.0 (-1.0)) 0.5 materialRight]
-    world <- randomScene g
+        world = HittableList [Sphere (V3 0.0 (-100.5) (-1)) 100 materialGround,
+           Sphere (V3 0.0 0.0 (-1.0)) 0.5 materialCenter,
+           Sphere (V3 (-1.0) 0.0 (-1.0)) 0.5 materialLeft,
+           Sphere (V3 (-1.0) 0.0 (-1.0)) (-0.4) materialLeft,
+           Sphere (V3 1.0 0.0 (-1.0)) 0.5 materialRight]
+    -- world <- randomScene g
     pb <- newProgressBar defStyle 10 (Progress 0 (fromInteger (width im * height im)) ())
 
     generateRandomRays g world im samplesPerPixel maxDepth pb
