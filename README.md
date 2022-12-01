@@ -1,3 +1,5 @@
+![image](https://user-images.githubusercontent.com/58437698/204404240-50338519-3f80-4627-ae6c-265eb5b8b99a.png)
+
 # haskell-rt
 A raytracer for my advanced functional programming class in fall 2022
 
