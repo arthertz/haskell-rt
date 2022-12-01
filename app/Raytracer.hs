@@ -11,8 +11,9 @@ import Control.Applicative ( Applicative(liftA2) )
 import Control.Monad
 import System.ProgressBar
 import Control.DeepSeq
-import Control.Parallel
 import Control.Concurrent
+import Control.Parallel.Strategies ( using, parListChunk, parMap, rdeepseq, rpar, rseq, parTraversable, withStrategy, usingIO)
+import Data.Traversable (for)
 
 -- NECESSARY
 -- DONE refactor rayColor to use HitRecord
@@ -70,7 +71,7 @@ makeCamera lookFrom lookAt vup verticalFieldOfView aspectRatio =
         h = tan (theta/2)
         vh = 2.0 * h
         vw = aspectRatio*vh
-        !w = normalize $! ( lookFrom - lookAt)
+        !w = normalize $! lookFrom - lookAt
         !u = normalize $! cross vup w
         v = cross w u
         origin = lookFrom
@@ -218,7 +219,7 @@ getCameraRay :: Camera -> (Double, Double) -> Ray
 getCameraRay Camera{origin=org, lowerLeftCorner=llc, horizontal=hor, vertical=vert} (u, v) = Ray{o=org, dir=llc + u*^hor + v*^vert - org}
 
 rayAt :: Ray -> Double -> V3 Double
-rayAt r t = let Ray {o = ro, dir = rdir} = r in ro + (t*^rdir)
+rayAt r t = let Ray {o = ro, dir = rdir} = r in force (ro + (t*^rdir))
 
 rayColorM :: StatefulGen g m => g -> Hittable -> Ray -> Int -> m (V3 Double)
 rayColorM g world r depth = if depth <= 0 then pure (V3 0 0 0)
@@ -252,32 +253,32 @@ genRandomRay cam world im maxDepth (i,j) g = runStateGen g $ genRandomRayM cam w
 generateRandomRays :: GenIO -> Camera -> Hittable -> Rect -> Int -> Int -> ProgressBar () -> IO [(Word8, Word8, Word8)]
 generateRandomRays g cam world im numSamples maxDepth pb = do
     let iterator = (\ ij acc -> liftA2 (+) acc (asGenIO (genRandomRayM cam world im maxDepth ij) g))
-    let samplePixel ij = (do -- increment the progress bar for one pixel
-                            result <- iterate' (iterator ij) (pure (V3 0 0 0)) !! numSamples
+        samplePixel ij = (do -- increment the progress bar for one pixel
+                            result <- iterate (iterator ij) (pure (V3 0 0 0)) !! numSamples
                             _ <- incProgress pb 1
-                            return result)
-    averageSamples <- forM [(i, j) | j <- map (height im -) [1 .. height im], i <- [1 .. width im]] samplePixel
-    let processedSamples = map (force . v3toTuple . processSamples numSamples) averageSamples
-    return $! processedSamples
+                            return $ force result)
+    let f ij = fmap (v3toTuple.processSamples numSamples) (samplePixel ij)
+    averageSamples <- mapM f [ (i, j) | j <- map (height im -) [1 .. height im], i <- [1 .. width im]]
+    return (averageSamples `using` parListChunk 64 rdeepseq)
+
 
 
 -- bounds = (tmin, tmax)
 hit :: Hittable -> Ray -> Bounds -> Either HitInvalid HitRecord
 hit Sphere{center=ctr, radius=r, material=mat} ray Bounds{tmin=tmin, tmax=tmax} =
     let Ray {o = ro, dir = rdir} = ray
-        oc = ro - ctr
-        a = quadrance rdir
+        !oc = ro - ctr
+        !a = quadrance rdir
         -- we use half of b to save a few multiplications during intersection testing
         -- this works because only care if the discriminant is greater than 0 and can factor out a 4
-        half_b = dot oc rdir
-        c = quadrance oc - r^2
+        !half_b = dot oc rdir
+        !c = quadrance oc - r^2
         !discriminant = half_b*half_b - a*c
         in if discriminant < 0 then
             Left (HitInvalid "Discriminant less than 0")
         else let
-                 sqrt_discriminant = sqrt discriminant
-                 !nearRoot = (-half_b - sqrt_discriminant)/a
-                 !farRoot  = (-half_b + sqrt_discriminant)/a
+                 nearRoot = (-half_b - sqrt discriminant)/a
+                 farRoot  = (-half_b + sqrt discriminant)/a
                  !validRoot | nearRoot >= tmin && nearRoot <= tmax = Right nearRoot
                             | farRoot >= tmin &&  farRoot <= tmax = Right farRoot
                             | otherwise = Left (HitInvalid "Neither root is within bounds")
@@ -392,9 +393,8 @@ wideAngleWorld =
         Sphere (V3 (-r) 0 (-1)) r left,
         Sphere (V3 r 0 (-1)) r right]
 
-
-testScene :: Int -> Int -> Integer -> Double -> IO [(Word8, Word8, Word8)]
-testScene samplesPerPixel maxDepth imageWidth aspectRatio = do
+renderScene :: Int -> Int -> Integer -> Double -> (GenIO -> IO Hittable) -> IO [(Word8, Word8, Word8)]
+renderScene samplesPerPixel maxDepth imageWidth aspectRatio genWorld = do
     -- initialize the pseudorandom number generator
     g <- MWC.create
 
@@ -406,17 +406,21 @@ testScene samplesPerPixel maxDepth imageWidth aspectRatio = do
         fov = 20
         cam = makeCamera origin lookAt up fov aspectRatio
 
-    --let materialCenter = Lambertian (V3 0.7 0.3 0.3)
-    --let materialLeft = Metal (V3 0.8 0.8 0.8) 0.3
-        -- materialGround = Lambertian (V3 0.8 0.8 0.0)
-        -- materialCenter = Lambertian (V3 0.1 0.2 0.5)
-        -- materialLeft = Dielectric{refractionIndex=1.5}
-        -- materialRight = Metal (V3 0.8 0.6 0.2) 0.0
-        -- world = HittableList [Sphere (V3 0.0 (-100.5) (-1)) 100 materialGround,
-        --    Sphere (V3 0.0 0.0 (-1.0)) 0.5 materialCenter,
-        --    Sphere (V3 (-1.0) 0.0 (-1.0)) 0.5 materialLeft,
-        --    Sphere (V3 (-1.0) 0.0 (-1.0)) (-0.4) materialLeft,
-        --    Sphere (V3 1.0 0.0 (-1.0)) 0.5 materialRight]
-    world <- randomScene g
+    scene <- genWorld g
     pb <- newProgressBar defStyle 10 (Progress 0 (fromIntegral (imageWidth * imageHeight)) ())
-    generateRandomRays g cam world Rect{ width=imageWidth, height=imageHeight} samplesPerPixel maxDepth pb
+    generateRandomRays g cam scene Rect{ width=imageWidth, height=imageHeight} samplesPerPixel maxDepth pb
+
+testScene :: Int -> Int -> Integer -> Double -> GenIO -> IO Hittable
+testScene samplesPerPixel maxDepth imageWidth aspectRatio _ =do 
+    let materialCenter = Lambertian (V3 0.7 0.3 0.3)
+        materialBehind = Metal (V3 0.8 0.8 0.8) 0.3
+        materialGround = Lambertian (V3 0.8 0.8 0.0)
+        materialLeft = Dielectric{refractionIndex=1.5}
+        materialRight = Metal (V3 0.8 0.6 0.2) 0.0
+    return $ HittableList [Sphere (V3 0.0 (-100.5) (-1)) 100 materialGround,
+           Sphere (V3 0.0 0.0 (-1.0)) 0.5 materialCenter,
+           Sphere (V3 (-1.0) 0.0 (-1.0)) 0.5 materialLeft,
+           Sphere (V3 (-1.0) 0.0 (-1.0)) (-0.4) materialLeft,
+           Sphere (V3 1.0 0.0 (-1.0)) 0.5 materialRight,
+           Sphere (V3 1.0 0.0 (-1.0)) 0.5 materialRight]
+        

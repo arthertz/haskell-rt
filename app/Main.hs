@@ -4,15 +4,16 @@ import Codec.PPM.Binary ( writePPM )
 
 main :: IO()
 main = do
-    let numSamples = 32
-        imageWidth = 720
+    let numSamples = 100
+        imageWidth = 1200
         aspectRatio = 3/2
         im = generateRect imageWidth aspectRatio
         imageHeight = height im
         maxDepth = 50
 
     putStrLn "Starting to generate image"
-    ppm <- testScene numSamples maxDepth imageWidth aspectRatio
+    let scene = randomScene --testScene numSamples maxDepth imageWidth aspectRatio
+    ppm <- renderScene numSamples maxDepth imageWidth aspectRatio scene 
     putStrLn "Done generating image"
     putStrLn "Writing image to file"
     writePPM "./testScene.ppm" (imageWidth, imageHeight) ppm
