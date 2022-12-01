@@ -1,4 +1,4 @@
-![image](https://user-images.githubusercontent.com/58437698/204404240-50338519-3f80-4627-ae6c-265eb5b8b99a.png)
+![image](https://user-images.githubusercontent.com/58437698/204949907-a5dd6fb4-44a8-4c00-bb91-aaac10ec60f6.png)
 
 # haskell-rt
 A raytracer for my advanced functional programming class in fall 2022
@@ -6,6 +6,8 @@ A raytracer for my advanced functional programming class in fall 2022
 ## Features (WIP)
 
 # Installation
+![image](https://user-images.githubusercontent.com/58437698/204949921-10e05c76-ae6d-4816-9b40-66c627568932.png)
+
 Make sure you have cabal installed (tested on 3.8.1.0) and a recent version of GHC (tested on 8.10.2)
 Navigate to the project directory and enter `cabal run`
 The project should build and output a series of .ppm files, which can be viewed with image viewers or online.
