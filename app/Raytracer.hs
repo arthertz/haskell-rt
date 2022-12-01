@@ -46,7 +46,7 @@ import Data.Traversable (for)
 -- TODO acceleration structure
 -- TODO textures for diffuse materials
 -- TODO lights
--- TODO parallelism
+-- DONE parallelism
 -- TODO some kind of denoiser on the output
 
 -- camera
