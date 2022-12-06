@@ -49,7 +49,7 @@ extra-doc-files:    CHANGELOG.md
 -- extra-source-files:
 
 common warnings
-    ghc-options: -Wall
+    ghc-options:
 
 executable haskell-raytracer
     -- Import common warning flags.
@@ -72,14 +72,14 @@ executable haskell-raytracer
     -- other-extensions:
 
     -- Other library packages from which modules are imported.
-    build-depends:    base ^>=4.14.1.0,
-                      AC-PPM ^>=1.1.1,
-                      linear ^>=1.21.10,
-                      random ^>= 1.2.1.1,
-                      mwc-random ^>= 0.15.0.2,
-                      terminal-progress-bar ^>= 0.4.1,
-                      parallel ^>= 3.2.2.0,
-                      deepseq ^>= 1.4
+    build-depends:    base >=4.14,
+                      AC-PPM >=1.1,
+                      linear >=1.21,
+                      random >= 1.2,
+                      mwc-random >= 0.15,
+                      terminal-progress-bar >= 0.4,
+                      parallel >= 3.2,
+                      deepseq >= 1.4
 
     -- Directories containing source files.
     hs-source-dirs:   app
@@ -96,13 +96,13 @@ benchmark ray-benchmark
         Raytracer
     hs-source-dirs:
         app, app/bench
-    build-depends:    base ^>=4.14.1.0,
-                      AC-PPM ^>=1.1.1,
-                      linear ^>=1.21.10,
-                      random ^>= 1.2.1.1,
-                      mwc-random ^>= 0.15.0.2,
-                      terminal-progress-bar ^>= 0.4.1,
-                      parallel ^>= 3.2.2.0,
-                      deepseq ^>= 1.4,
-                      criterion ^>= 1.5
+    build-depends:    base >=4.14,
+                      AC-PPM >=1.1,
+                      linear >=1.21,
+                      random >= 1.2,
+                      mwc-random >= 0.15,
+                      terminal-progress-bar >= 0.4,
+                      parallel >= 3.2,
+                      deepseq >= 1.4,
+                      criterion >= 1.5
     default-language: Haskell2010
