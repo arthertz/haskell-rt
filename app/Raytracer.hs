@@ -194,10 +194,9 @@ instance Scatterable Material where
         let !reflected = reflect (signorm (dir rayIn)) (normal record)
             fuzz = if f < 1 then f else 1
             scattered = Ray{o=point record, dir=reflected + fuzz *^ unitSphere}
-        if dot reflected (normal record) > 0 then
-            return $ Right (scattered, albedo)
-        else
-            return (Left (HitInvalid "No reflection"))
+        return (if dot reflected (normal record) > 0
+                then Right (scattered, albedo)
+                else Left (HitInvalid "No reflection"))
     scatter _ (JustRefractive ir) rayIn record = let
             attenuation = V3 1.0 1.0 1.0
             refractionRatio = if frontFace record then 1.0/ir else ir
