@@ -4,6 +4,11 @@
 A raytracer for my advanced functional programming class in fall 2022
 
 ## Features (WIP)
+* Renders spheres
+* Supports different material types (Lambertian, Metal, Dielectric)
+* Antialiasing
+* Positionable camera
+* Utilizes multiple cores
 
 # Installation
 ![image](https://user-images.githubusercontent.com/58437698/204949921-10e05c76-ae6d-4816-9b40-66c627568932.png)
