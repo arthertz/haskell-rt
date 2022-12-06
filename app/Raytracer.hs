@@ -1,19 +1,28 @@
 module Raytracer where
 import GHC.Word (Word8)
-import GHC.List (iterate')
 import Linear.Metric
+    ( normalize, Metric(norm, signorm, dot, quadrance) )
 import Linear.V3
-import Linear.Vector
+import Linear.Vector ( Additive((^+^), lerp), (*^), (^*), (^/) )
 import Linear (nearZero)
 import System.Random.Stateful
-import System.Random.MWC as MWC
+    ( RandomGen,
+      runStateGen,
+      uniformDouble01M,
+      StatefulGen)
+import System.Random.MWC
+    ( UniformRange(..), asGenIO, create, GenIO )
 import Control.Applicative ( Applicative(liftA2) )
-import Control.Monad
+import Control.Monad ( liftM3 )
 import System.ProgressBar
-import Control.DeepSeq
-import Control.Concurrent
-import Control.Parallel.Strategies ( using, parListChunk, parMap, rdeepseq, rpar, rseq, parTraversable, withStrategy, usingIO)
-import Data.Traversable (for)
+    ( defStyle,
+      incProgress,
+      newProgressBar,
+      Progress(Progress),
+      ProgressBar )
+import Control.DeepSeq ( force )
+import Control.Parallel.Strategies ( using, parListChunk, rdeepseq)
+import Control.Parallel (pseq)
 
 -- NECESSARY
 -- DONE refactor rayColor to use HitRecord
@@ -177,7 +186,7 @@ refract uv n etaRatio =
 
 instance Scatterable Material where
     scatter g (Lambertian albedo) _ record = do
-        !scatterDirection <- (normal record +) . signorm <$> randomInUnitSphereM g
+        scatterDirection <- (normal record +) . signorm <$> randomInUnitSphereM g
         let isDegenerate = nearZero scatterDirection
         return $ Right (Ray{o= point record, dir=if isDegenerate then normal record else scatterDirection},   albedo)
     scatter g (Metal albedo f) rayIn record = do
@@ -252,18 +261,15 @@ genRandomRay cam world im maxDepth (i,j) g = runStateGen g $ genRandomRayM cam w
 
 generateRandomRays :: GenIO -> Camera -> Hittable -> Rect -> Int -> Int -> ProgressBar () -> IO [(Word8, Word8, Word8)]
 generateRandomRays g cam world im numSamples maxDepth pb = do
-    let iterator = (\ ij acc -> liftA2 (+) acc (asGenIO (genRandomRayM cam world im maxDepth ij) g))
+    let getRandomRay ij = asGenIO (genRandomRayM cam world im maxDepth ij) g
+        iterator = liftA2 (+) . getRandomRay
         samplePixel ij = (do -- increment the progress bar for one pixel
-                            result <- iterate (iterator ij) (pure (V3 0 0 0)) !! numSamples
                             _ <- incProgress pb 1
-                            return $ force result)
-    let f ij = fmap (v3toTuple.processSamples numSamples) (samplePixel ij)
-    averageSamples <- mapM f [ (i, j) | j <- map (height im -) [1 .. height im], i <- [1 .. width im]]
+                            iterate (iterator ij) (pure (V3 0 0 0)) !! numSamples)
+        evalPixel ij = fmap (v3toTuple.processSamples numSamples) (samplePixel ij)
+    averageSamples <- sequence [evalPixel (i, j) | j <- map (height im -) [1 .. height im], i <- [1 .. width im]]
     return (averageSamples `using` parListChunk 64 rdeepseq)
 
-
-
--- bounds = (tmin, tmax)
 hit :: Hittable -> Ray -> Bounds -> Either HitInvalid HitRecord
 hit Sphere{center=ctr, radius=r, material=mat} ray Bounds{tmin=tmin, tmax=tmax} =
     let Ray {o = ro, dir = rdir} = ray
@@ -277,7 +283,7 @@ hit Sphere{center=ctr, radius=r, material=mat} ray Bounds{tmin=tmin, tmax=tmax} 
         in if discriminant < 0 then
             Left (HitInvalid "Discriminant less than 0")
         else let
-                 nearRoot = (-half_b - sqrt discriminant)/a
+                 !nearRoot = (-half_b - sqrt discriminant)/a
                  farRoot  = (-half_b + sqrt discriminant)/a
                  !validRoot | nearRoot >= tmin && nearRoot <= tmax = Right nearRoot
                             | farRoot >= tmin &&  farRoot <= tmax = Right farRoot
@@ -364,7 +370,7 @@ randomSphere g (xdiff, ydiff) (a, b) = do
     c2 <- randomColor g
     fuzz <- uniformDouble01M g
     let center = V3 (fromIntegral a + 0.9*xdiff) 0.2 (fromIntegral b +0.9*ydiff)
-    let result  | chooseMat < 0.8 = Sphere center 0.2 (Lambertian (c1 * c2))
+        result  | chooseMat < 0.8 = Sphere center 0.2 (Lambertian (c1 * c2))
                 | chooseMat < 0.95 = Sphere center 0.2 (Metal (0.5 ^+^ (0.5 *^ c1)) (0.5 * fuzz))
                 | otherwise = Sphere center 0.2 (Dielectric 1.5)
     return result
@@ -396,7 +402,7 @@ wideAngleWorld =
 renderScene :: Int -> Int -> Integer -> Double -> (GenIO -> IO Hittable) -> IO [(Word8, Word8, Word8)]
 renderScene samplesPerPixel maxDepth imageWidth aspectRatio genWorld = do
     -- initialize the pseudorandom number generator
-    g <- MWC.create
+    g <- create
 
     -- camera
     let imageHeight = round (fromIntegral imageWidth / aspectRatio) :: Integer
@@ -411,7 +417,7 @@ renderScene samplesPerPixel maxDepth imageWidth aspectRatio genWorld = do
     generateRandomRays g cam scene Rect{ width=imageWidth, height=imageHeight} samplesPerPixel maxDepth pb
 
 testScene :: Int -> Int -> Integer -> Double -> GenIO -> IO Hittable
-testScene samplesPerPixel maxDepth imageWidth aspectRatio _ =do 
+testScene samplesPerPixel maxDepth imageWidth aspectRatio _ =do
     let materialCenter = Lambertian (V3 0.7 0.3 0.3)
         materialBehind = Metal (V3 0.8 0.8 0.8) 0.3
         materialGround = Lambertian (V3 0.8 0.8 0.0)
