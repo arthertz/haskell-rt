@@ -99,7 +99,21 @@ makeCamera lookFrom lookAt vup verticalFieldOfView aspectRatio =
             vfov = verticalFieldOfView,
             w = w, u=u, v=v}
 
+data Hittable = Sphere {
+    center :: V3 Double,
+    radius :: Double,
+    material :: Material
+} | HittableList [Hittable]
 
+data Bounds = Bounds {
+    tmin :: Double,
+    tmax :: Double
+}
+
+data Rect = Rect {
+    height :: Integer,
+    width :: Integer
+}
 
 data Ray = Ray { o   :: V3 Double,
                  dir :: V3 Double}
@@ -111,6 +125,11 @@ data HitRecord = HitRecord {
     root :: {-# UNPACK #-} !Double,
     frontFace :: {-# UNPACK #-} !Bool
 }
+
+data Material = Lambertian{albedo :: V3 Double}
+                | Metal{albedo :: V3 Double, f :: Double}
+                | JustRefractive{refractionIndex :: Double}
+                | Dielectric{refractionIndex :: Double}
 
 -- newtype to avoid orphan instance
 data RandomV3 = RandomV3 Double Double Double
@@ -135,6 +154,13 @@ randomColor g = unwrapRV3 <$> uniformRM (RandomV3 0 0 0, RandomV3 1 1 1) g
 reflect :: V3 Double -> V3 Double -> V3 Double
 reflect v n = v - 2 * dot v n *^ n
 
+refract :: V3 Double -> V3 Double -> Double -> V3 Double
+refract uv n etaRatio =
+    let cosTheta = min (dot (-uv) n) 1.0
+        perp = etaRatio *^ (uv + cosTheta *^ n)
+        parallelTo = (n^*).(0-).sqrt.abs.(1.0-).quadrance
+    in perp + parallelTo perp
+
 randomInUnitSphereM :: StatefulGen g m => g -> m (V3 Double)
 randomInUnitSphereM g = let cubeInterval = uniformRM (-1, 1) g
                             v3 = liftM3 V3 cubeInterval cubeInterval cubeInterval
@@ -149,46 +175,18 @@ setFaceNormal HitRecord{point=p, root=rt, hitMaterial=hmt} ry outwardNormal = do
         newNormal = if newFrontFace then outwardNormal else -outwardNormal
     HitRecord{point=p, normal=newNormal, root=rt, frontFace=newFrontFace, hitMaterial=hmt}
 
-data Hittable = Sphere {
-    center :: V3 Double,
-    radius :: Double,
-    material :: Material
-} | HittableList [Hittable]
-
-data Bounds = Bounds {
-    tmin :: Double,
-    tmax :: Double
-}
-
-data Rect = Rect {
-    height :: Integer,
-    width :: Integer
-}
 generateRect :: Integer -> Double -> Rect
 generateRect imageWidth aspectRatio = Rect {width=imageWidth, height=round(fromIntegral imageWidth / aspectRatio)}
 
-data Material = Lambertian{albedo :: V3 Double}
-                | Metal{albedo :: V3 Double, f :: Double}
-                | JustRefractive{refractionIndex :: Double}
-                | Dielectric{refractionIndex :: Double}
-
 class Scatterable a where
     scatter :: StatefulGen g m => g -> a -> Ray -> HitRecord -> m (Either HitInvalid (Ray, V3 Double))
-
-
-refract :: V3 Double -> V3 Double -> Double -> V3 Double
-refract uv n etaRatio =
-    let cosTheta = min (dot (-uv) n) 1.0
-        perp = etaRatio *^ (uv + cosTheta *^ n)
-        parallelTo = (n^*).(0-).sqrt.abs.(1.0-).quadrance
-    in perp + parallelTo perp
-
 
 instance Scatterable Material where
     scatter g (Lambertian albedo) _ record = do
         scatterDirection <- (normal record +) . signorm <$> randomInUnitSphereM g
         let isDegenerate = nearZero scatterDirection
         return $ Right (Ray{o= point record, dir=if isDegenerate then normal record else scatterDirection},   albedo)
+
     scatter g (Metal albedo f) rayIn record = do
         unitSphere <- randomInUnitSphereM g
         let !reflected = reflect (signorm (dir rayIn)) (normal record)
@@ -197,12 +195,14 @@ instance Scatterable Material where
         return (if dot reflected (normal record) > 0
                 then Right (scattered, albedo)
                 else Left (HitInvalid "No reflection"))
+
     scatter _ (JustRefractive ir) rayIn record = let
             attenuation = V3 1.0 1.0 1.0
             refractionRatio = if frontFace record then 1.0/ir else ir
             !refracted = refract (signorm $ dir rayIn) (normal record) refractionRatio
             scattered = Ray{o=point record, dir=refracted}
         in pure $ Right (scattered, attenuation)
+
     scatter g (Dielectric ir) rayIn record = do
         let attenuation = V3 1.0 1.0 1.0
             refractionRatio = if frontFace record then 1.0/ir else ir
@@ -224,7 +224,8 @@ reflectance cos rr = let
     in r1 + (1-r1)*(1.0-cos)^5
 
 getCameraRay :: Camera -> (Double, Double) -> Ray
-getCameraRay Camera{origin=org, lowerLeftCorner=llc, horizontal=hor, vertical=vert} (u, v) = Ray{o=org, dir=llc + u*^hor + v*^vert - org}
+getCameraRay Camera{origin=org, lowerLeftCorner=llc, horizontal=hor, vertical=vert} (u, v) =
+    Ray{o=org, dir=llc + u*^hor + v*^vert - org}
 
 rayAt :: Ray -> Double -> V3 Double
 rayAt r t = let Ray {o = ro, dir = rdir} = r in force (ro + (t*^rdir))

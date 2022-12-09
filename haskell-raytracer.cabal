@@ -63,7 +63,7 @@ executable haskell-raytracer
         -threaded
         "-with-rtsopts=-N"
 
-    extensions: DataKinds BangPatterns
+    extensions: DataKinds BangPatterns StrictData
 
     -- Modules included in this executable, other than Main.
     other-modules: Raytracer
