@@ -63,6 +63,8 @@ executable haskell-raytracer
         -threaded
         "-with-rtsopts=-N"
 
+    -- StrictData extension suggested by Artem after the presentation
+    -- It seems to make a difference for memory usage and performance!!!
     extensions: DataKinds BangPatterns StrictData
 
     -- Modules included in this executable, other than Main.
@@ -91,7 +93,7 @@ benchmark ray-benchmark
     type: exitcode-stdio-1.0
     main-is: bench/Main.hs
     ghc-options: -O2 -threaded -rtsopts "-with-rtsopts=-N"
-    extensions: DataKinds BangPatterns
+    extensions: DataKinds BangPatterns StrictData
     other-modules:
         Raytracer
     hs-source-dirs:
