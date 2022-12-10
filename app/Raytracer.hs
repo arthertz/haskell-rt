@@ -61,7 +61,6 @@ import Control.Parallel (pseq)
 -- camera
 data Camera = Camera {
 viewportHeight :: Double,
-focalLength :: Double,
 origin :: V3 Double,
 aspectRatio :: Double,
 viewportWidth :: Double,
